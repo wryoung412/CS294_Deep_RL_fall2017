@@ -34,23 +34,77 @@ def build_mlp(
     #========================================================================================#
 
     with tf.variable_scope(scope):
-        # YOUR_CODE_HERE
-        pass
+        # MY_CODE_HERE
+        hidden = input_placeholder
+        for i in range(n_layers):
+            hidden = tf.layers.dense(hidden, size, activation, name='blah' + str(i))
+        return tf.layers.dense(hidden, output_size, output_activation)
 
 def pathlength(path):
     return len(path["reward"])
 
-
+def reward_to_q(rewards, gamma, reward_to_go):
+    q = np.zeros_like(rewards)
+    T = len(rewards)
+    if reward_to_go:
+        q += rewards
+        for i in range(1, T):
+            q[:(T - i)] += gamma * q[i:T]
+    else:
+        r = 0
+        for i in range(T - 1, -1, -1):
+            r = rewards[i] + gamma * r
+        q = r * np.ones_like(q)
+    return q
+        
 
 #============================================================================================#
 # Policy Gradient
 #============================================================================================#
 
+# batch_size is more natural for PG as we need to take average over paths. 
+# timesteps_per_batch is more relevant for Q-learning as learning is done step by step.
+
+# CartPole
+# Here is a good run
+# python train_pg.py CartPole-v0 --n_layers 4 --target_reward 200 --learning_rate 1e-2 --nn_baseline --batch_size 10
+# ********** Iteration 8 ************
+# total trials: 90
+# ----------------------------------------
+# |               Time |            31.1 |
+# |          Iteration |               8 |
+# |      AverageReturn |             200 |
+# |          StdReturn |               0 |
+# |          MaxReturn |             200 |
+# |          MinReturn |             200 |
+# |          EpLenMean |             200 |
+# |           EpLenStd |               0 |
+# | TimestepsThisBatch |           2e+03 |
+# |     TimestepsSoFar |        1.15e+04 |
+# ----------------------------------------
+#
+# MountainCar
+# Working poorly. It seems some good exploration is needed to get any positive path.
+# 
+# Acrobot
+# Similar to MountainCar, but it is possible to randomly get a positive path,
+# and then the model starts to learn.
+# I can get to about 90 steps. What is the "solve" criterion?
+# https://github.com/jonholifield/Acrobot-v1
+
+# Box2D
+# https://github.com/pybox2d/pybox2d/blob/master/INSTALL.md
+# 'sudo' python setup.py install: should not use sudo in venv, it complains about setuptools not found
+# LunarLander
+# It does not do that well but works to some extent. 
+
+
 def train_PG(exp_name='',
              env_name='CartPole-v0',
              n_iter=100, 
              gamma=1.0, 
-             min_timesteps_per_batch=1000, 
+             # min_timesteps_per_batch=1000,
+             batch_size=20,
              max_path_length=None,
              learning_rate=5e-3, 
              reward_to_go=True, 
@@ -61,10 +115,13 @@ def train_PG(exp_name='',
              seed=0,
              # network arguments
              n_layers=1,
-             size=32
+             size=32,
+             target_reward=None
              ):
 
     start = time.time()
+
+    TODO = 1
 
     # Configure output directory for logging
     logz.configure_output_dir(logdir)
@@ -84,6 +141,7 @@ def train_PG(exp_name='',
     
     # Is this env continuous, or discrete?
     discrete = isinstance(env.action_space, gym.spaces.Discrete)
+    assert discrete, 'only discrete is implemented'
 
     # Maximum length for episodes
     max_path_length = max_path_length or env.spec.max_episode_steps
@@ -123,7 +181,7 @@ def train_PG(exp_name='',
         sy_ac_na = tf.placeholder(shape=[None, ac_dim], name="ac", dtype=tf.float32) 
 
     # Define a placeholder for advantages
-    sy_adv_n = TODO
+    sy_adv_n = tf.placeholder(shape=[None], name="adv", dtype=tf.float32) 
 
 
     #========================================================================================#
@@ -166,10 +224,15 @@ def train_PG(exp_name='',
     #========================================================================================#
 
     if discrete:
-        # YOUR_CODE_HERE
-        sy_logits_na = TODO
-        sy_sampled_ac = TODO # Hint: Use the tf.multinomial op
-        sy_logprob_n = TODO
+        # MY_CODE_HERE
+        sy_logits_na = build_mlp(
+            sy_ob_no,
+            ac_dim,
+            "nn_policy",
+            n_layers=n_layers,
+            size=size)
+        sy_sampled_ac = tf.multinomial(sy_logits_na, 1) # Hint: Use the tf.multinomial op
+        sy_logprob_n = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=sy_logits_na, labels=sy_ac_na)
 
     else:
         # YOUR_CODE_HERE
@@ -185,7 +248,10 @@ def train_PG(exp_name='',
     # Loss Function and Training Operation
     #========================================================================================#
 
-    loss = TODO # Loss function that we'll differentiate to get the policy gradient.
+    # MY_CODE_HERE
+    # Loss function that we'll differentiate to get the policy gradient.
+    # TODO: reduce_mean is not really correct here
+    loss = tf.reduce_mean(sy_logprob_n * sy_adv_n)
     update_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 
 
@@ -203,8 +269,10 @@ def train_PG(exp_name='',
                                 size=size))
         # Define placeholders for targets, a loss function and an update op for fitting a 
         # neural network baseline. These will be used to fit the neural network baseline. 
-        # YOUR_CODE_HERE
-        baseline_update_op = TODO
+        # MY_CODE_HERE
+        sy_q_n = tf.placeholder(shape=[None], name='q', dtype=tf.float32)
+        baseline_loss = tf.nn.l2_loss(baseline_prediction - sy_q_n)
+        baseline_update_op = tf.train.AdamOptimizer(learning_rate).minimize(baseline_loss)
 
 
     #========================================================================================#
@@ -217,24 +285,29 @@ def train_PG(exp_name='',
     sess.__enter__() # equivalent to `with sess:`
     tf.global_variables_initializer().run() #pylint: disable=E1101
 
-
+    tf_board = os.path.join('/tmp/gube/hw2')
+    writer = tf.summary.FileWriter(os.path.join(tf_board, str(int(time.time()))))
+    writer.add_graph(sess.graph)
+    merged_summary = tf.summary.merge_all()
 
     #========================================================================================#
     # Training Loop
     #========================================================================================#
 
     total_timesteps = 0
+    total_trials = 0
 
     for itr in range(n_iter):
         print("********** Iteration %i ************"%itr)
 
         # Collect paths until we have enough timesteps
         timesteps_this_batch = 0
+        trials_this_batch = 0
         paths = []
         while True:
             ob = env.reset()
             obs, acs, rewards = [], [], []
-            animate_this_episode=(len(paths)==0 and (itr % 10 == 0) and animate)
+            animate_this_episode=(len(paths)==0 and (itr % 5 == 0) and animate)
             steps = 0
             while True:
                 if animate_this_episode:
@@ -242,21 +315,26 @@ def train_PG(exp_name='',
                     time.sleep(0.05)
                 obs.append(ob)
                 ac = sess.run(sy_sampled_ac, feed_dict={sy_ob_no : ob[None]})
-                ac = ac[0]
+                ac = ac[0][0]  # was ac[0]
                 acs.append(ac)
                 ob, rew, done, _ = env.step(ac)
                 rewards.append(rew)
                 steps += 1
                 if done or steps > max_path_length:
                     break
+            total_trials += 1
+            trials_this_batch += 1
             path = {"observation" : np.array(obs), 
                     "reward" : np.array(rewards), 
                     "action" : np.array(acs)}
             paths.append(path)
             timesteps_this_batch += pathlength(path)
-            if timesteps_this_batch > min_timesteps_per_batch:
+            # if timesteps_this_batch > min_timesteps_per_batch:
+            #     break
+            if trials_this_batch == batch_size:
                 break
         total_timesteps += timesteps_this_batch
+        print('total trials:', total_trials)
 
         # Build arrays for observation, action for the policy gradient update by concatenating 
         # across paths
@@ -316,8 +394,8 @@ def train_PG(exp_name='',
         #
         #====================================================================================#
 
-        # YOUR_CODE_HERE
-        q_n = TODO
+        # MY_CODE_HERE
+        q_n = np.concatenate([reward_to_q(path['reward'], gamma, reward_to_go) for path in paths])
 
         #====================================================================================#
         #                           ----------SECTION 5----------
@@ -333,7 +411,9 @@ def train_PG(exp_name='',
             # (mean and std) of the current or previous batch of Q-values. (Goes with Hint
             # #bl2 below.)
 
-            b_n = TODO
+            # MY_CODE_HERE
+            # The bootstrap version uses r_t + v(s_{t+1}) - v(s_t), which is biased
+            b_n = sess.run(baseline_prediction, feed_dict={sy_ob_no: ob_no})
             adv_n = q_n - b_n
         else:
             adv_n = q_n.copy()
@@ -346,8 +426,16 @@ def train_PG(exp_name='',
         if normalize_advantages:
             # On the next line, implement a trick which is known empirically to reduce variance
             # in policy gradient methods: normalize adv_n to have mean zero and std=1. 
-            # YOUR_CODE_HERE
-            pass
+            # MY_CODE_HERE
+            adv_mu = np.mean(adv_n)
+            adv_std = np.std(adv_n)
+            # Could be more robust than this
+            if adv_std == 0.0:
+                return
+            # The normalization could be problematic.
+            # For environments like CartPole, the reward is an integer and is capped at 200.
+            # When not using base, adv_n could all be 200 and adv_std = 0. 
+            adv_n = (adv_n - adv_mu) / adv_std
 
 
         #====================================================================================#
@@ -365,8 +453,14 @@ def train_PG(exp_name='',
             # Hint #bl2: Instead of trying to target raw Q-values directly, rescale the 
             # targets to have mean zero and std=1. (Goes with Hint #bl1 above.)
 
-            # YOUR_CODE_HERE
-            pass
+            # MY_CODE_HERE
+            # TODO: what is the right way to fit?
+            # 1. Using fixed number of steps.
+            # It might not balance the good vs bad paths well, but 100 seems pretty good. 
+            # 2. Using timesteps as number of steps. This is CartPole specific.
+            print('timesteps:', timesteps_this_batch)
+            for i in range(100):
+                sess.run(baseline_update_op, feed_dict={sy_ob_no: ob_no, sy_q_n: q_n})
 
         #====================================================================================#
         #                           ----------SECTION 4----------
@@ -379,7 +473,10 @@ def train_PG(exp_name='',
         # For debug purposes, you may wish to save the value of the loss function before
         # and after an update, and then log them below. 
 
-        # YOUR_CODE_HERE
+        # MY_CODE_HERE
+        sess.run(update_op, feed_dict={sy_ob_no: ob_no,
+                                       sy_ac_na: ac_na,
+                                       sy_adv_n: adv_n})
 
 
         # Log diagnostics
@@ -397,7 +494,11 @@ def train_PG(exp_name='',
         logz.log_tabular("TimestepsSoFar", total_timesteps)
         logz.dump_tabular()
         logz.pickle_tf_vars()
-
+        
+        # This stopping criterion is not robust when the batch size is small.
+        if target_reward is not None:
+            if np.mean([path["reward"].sum() for path in paths]) >= target_reward:
+                return
 
 def main():
     import argparse
@@ -417,6 +518,7 @@ def main():
     parser.add_argument('--n_experiments', '-e', type=int, default=1)
     parser.add_argument('--n_layers', '-l', type=int, default=1)
     parser.add_argument('--size', '-s', type=int, default=32)
+    parser.add_argument('--target_reward', type=float, default=None)
     args = parser.parse_args()
 
     if not(os.path.exists('data')):
@@ -437,7 +539,8 @@ def main():
                 env_name=args.env_name,
                 n_iter=args.n_iter,
                 gamma=args.discount,
-                min_timesteps_per_batch=args.batch_size,
+                # min_timesteps_per_batch=args.batch_size,
+                batch_size=args.batch_size,
                 max_path_length=max_path_length,
                 learning_rate=args.learning_rate,
                 reward_to_go=args.reward_to_go,
@@ -447,7 +550,8 @@ def main():
                 nn_baseline=args.nn_baseline, 
                 seed=seed,
                 n_layers=args.n_layers,
-                size=args.size
+                size=args.size,
+                target_reward=args.target_reward
                 )
         # Awkward hacky process runs, because Tensorflow does not like
         # repeatedly calling train_PG in the same thread.
