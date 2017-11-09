@@ -3,12 +3,46 @@ import gym.spaces
 import itertools
 import numpy as np
 import random
+import time
+from datetime import timedelta
 import tensorflow                as tf
 import tensorflow.contrib.layers as layers
 from collections import namedtuple
 from dqn_utils import *
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
+
+# GPU usage is at most 5% on average. How to increase that?
+# The more important question is how to speed up training?
+## The time used is dominated by act, not training. It is understandable that more and more acts are by model. But model act time is also increasing. Why is that?
+## 1. Do batch inference for act. A queue of games.
+## 2. It seems training is not the bottleneck. More training better uses the GPU, larger batch size, more frequent. 
+# Wait, it is around 5 min per 10000 iterations? Does not sound serious?
+
+def diff_to_timedelta(time_diff):
+    return timedelta(seconds=int(round(time_diff)))
+
+class time_stats:
+    def __init__(self, name):
+        self._name = name
+        self.clear()
+
+    def clear(self):
+        self._sum = 0.
+        self._n = 0
+
+    def add(self, x):
+        self._sum += x
+        self._n += 1
+
+    def count(self):
+        return self._n
+
+    def average(self):
+        return self._sum / self._n
+
+    def name(self):
+        return self._name
 
 def learn(env,
           q_func,
@@ -77,6 +111,8 @@ def learn(env,
     assert type(env.observation_space) == gym.spaces.Box
     assert type(env.action_space)      == gym.spaces.Discrete
 
+    # learning_starts should be smaller than the pure exploration length
+
     ###############
     # BUILD MODEL #
     ###############
@@ -127,7 +163,20 @@ def learn(env,
     # Older versions of TensorFlow may require using "VARIABLES" instead of "GLOBAL_VARIABLES"
     ######
     
-    # YOUR CODE HERE
+    # MY CODE HERE
+    # How to use done_mask_ph?
+    q_t_all = q_func(obs_t_float, num_actions, scope="q_func", reuse=False)
+    act_t_one_hot = tf.one_hot(act_t_ph, num_actions)
+    q_t = tf.reduce_sum(q_t_all * act_t_one_hot, 1)
+    # Could do double Q learning here. Substantially better
+    q_tp1 = tf.reduce_max(q_func(obs_tp1_float, num_actions, scope="target_q_func", reuse=False),
+                          axis = 1)
+    target_q_t = rew_t_ph + gamma * q_tp1 * tf.cast(tf.logical_not(tf.equal(done_mask_ph, 1)),
+                                                  tf.float32)
+    total_error = tf.nn.l2_loss(q_t - target_q_t)
+    
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
 
     ######
 
@@ -157,7 +206,14 @@ def learn(env,
     last_obs = env.reset()
     LOG_EVERY_N_STEPS = 10000
 
+    # TODO: use namedtuple instead
+    all_time_stats = {}
+    time_stats_names = ['iter', 'act', 'model act']
+    for name in time_stats_names:
+        all_time_stats[name] = time_stats(name)
+
     for t in itertools.count():
+        iter_start_time = time.time()
         ### 1. Check stopping criterion
         if stopping_criterion is not None and stopping_criterion(env, t):
             break
@@ -193,8 +249,29 @@ def learn(env,
         # might as well be random, since you haven't trained your net...)
 
         #####
+
+        # The structure here is much simpler than PG. Each t is only a single step. 
+        # There is no need to use nested structure as it is managed by replay_buffer.
+        # 'done' is stored as the delimiter between runs.
+        #
+        # In fact, the scheduling is so simple that t is enough to manage training.
         
-        # YOUR CODE HERE
+        # MY CODE HERE
+        idx = replay_buffer.store_frame(last_obs)
+        epsilon = exploration.value(t)
+        act_start_time = time.time()
+        if not model_initialized or np.random.rand() < epsilon:
+            act = np.random.randint(num_actions)
+        else:
+            start_time = time.time()
+            act = session.run(tf.argmax(q_t_all, axis = 1),
+                              feed_dict={obs_t_ph: replay_buffer.encode_recent_observation()[None]})[0]
+            all_time_stats['model act'].add(time.time() - start_time)
+        all_time_stats['act'].add(time.time() - act_start_time)
+        last_obs, r, done, _ = env.step(act)
+        replay_buffer.store_effect(idx, act, r, done)
+        if done:
+            last_obs = env.reset()
 
         #####
 
@@ -245,9 +322,36 @@ def learn(env,
             #####
             
             # YOUR CODE HERE
-
+            # 3.a
+            start_time = time.time()
+            obs_t_batch, act_t_batch, rew_t_batch, obs_tp1_batch, done_mask_batch = replay_buffer.sample(batch_size)
+            # 3.b
+            if not model_initialized:
+                initialize_interdependent_variables(session, tf.global_variables(), {
+                    obs_t_ph: obs_t_batch,
+                    obs_tp1_ph: obs_tp1_batch,
+                })
+                model_initialized = True
+            # 3.c
+            # Why learning schedule is not automatically applied?
+            start_time = time.time()
+            session.run(train_fn, feed_dict={
+                obs_t_ph: obs_t_batch,
+                act_t_ph: act_t_batch,
+                rew_t_ph: rew_t_batch,
+                obs_tp1_ph: obs_tp1_batch,
+                done_mask_ph: done_mask_batch,
+                learning_rate: optimizer_spec.lr_schedule.value(t),
+            })
+            num_param_updates += 1
+            # 3.d
+            if num_param_updates % target_update_freq == 0:
+                session.run(update_target_fn)
+            
             #####
 
+        all_time_stats['iter'].add(time.time() - iter_start_time)
+        
         ### 4. Log progress
         episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()
         if len(episode_rewards) > 0:
@@ -261,4 +365,7 @@ def learn(env,
             print("episodes %d" % len(episode_rewards))
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
+            for name, stats in all_time_stats.items():
+                print("average %s time:" % name, stats.average(), stats.count())
+                stats.clear()
             sys.stdout.flush()
