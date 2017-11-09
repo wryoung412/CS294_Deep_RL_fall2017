@@ -12,13 +12,6 @@ from dqn_utils import *
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
 
-# GPU usage is at most 5% on average. How to increase that?
-# The more important question is how to speed up training?
-## The time used is dominated by act, not training. It is understandable that more and more acts are by model. But model act time is also increasing. Why is that?
-## 1. Do batch inference for act. A queue of games.
-## 2. It seems training is not the bottleneck. More training better uses the GPU, larger batch size, more frequent. 
-# Wait, it is around 5 min per 10000 iterations? Does not sound serious?
-
 def diff_to_timedelta(time_diff):
     return timedelta(seconds=int(round(time_diff)))
 
