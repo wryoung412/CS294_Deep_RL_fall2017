@@ -4,6 +4,7 @@ import itertools
 import numpy as np
 import random
 import time
+import os
 from datetime import timedelta
 import tensorflow                as tf
 import tensorflow.contrib.layers as layers
@@ -32,6 +33,8 @@ class time_stats:
         return self._n
 
     def average(self):
+        if self._n == 0:
+            return 0.
         return self._sum / self._n
 
     def name(self):
@@ -159,14 +162,15 @@ def learn(env,
     # MY CODE HERE
     # How to use done_mask_ph?
     q_t_all = q_func(obs_t_float, num_actions, scope="q_func", reuse=False)
+    act_t_best = tf.argmax(q_t_all, axis = 1, name='act_t_best')
     act_t_one_hot = tf.one_hot(act_t_ph, num_actions)
     q_t = tf.reduce_sum(q_t_all * act_t_one_hot, 1)
     # Could do double Q learning here. Substantially better
-    q_tp1 = tf.reduce_max(q_func(obs_tp1_float, num_actions, scope="target_q_func", reuse=False),
-                          axis = 1)
+    q_tp1_all = q_func(obs_tp1_float, num_actions, scope="target_q_func", reuse=False)
+    q_tp1 = tf.reduce_max(q_tp1_all, axis = 1)
     target_q_t = rew_t_ph + gamma * q_tp1 * tf.cast(tf.logical_not(tf.equal(done_mask_ph, 1)),
                                                   tf.float32)
-    total_error = tf.nn.l2_loss(q_t - target_q_t)
+    total_error = tf.reduce_mean(tf.squared_difference(q_t, target_q_t))
     
     q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
     target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_q_func')
@@ -257,8 +261,9 @@ def learn(env,
             act = np.random.randint(num_actions)
         else:
             start_time = time.time()
-            act = session.run(tf.argmax(q_t_all, axis = 1),
-                              feed_dict={obs_t_ph: replay_buffer.encode_recent_observation()[None]})[0]
+            encoded_last_obs = replay_buffer.encode_recent_observation()
+            act = session.run(act_t_best,
+                              feed_dict={obs_t_ph: encoded_last_obs[None]})[0]
             all_time_stats['model act'].add(time.time() - start_time)
         all_time_stats['act'].add(time.time() - act_start_time)
         last_obs, r, done, _ = env.step(act)
@@ -314,7 +319,7 @@ def learn(env,
             # variable num_param_updates useful for this (it was initialized to 0)
             #####
             
-            # YOUR CODE HERE
+            # MY CODE HERE
             # 3.a
             start_time = time.time()
             obs_t_batch, act_t_batch, rew_t_batch, obs_tp1_batch, done_mask_batch = replay_buffer.sample(batch_size)
@@ -352,6 +357,10 @@ def learn(env,
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
+            tf_board = os.path.join('/tmp/gube/dqn', str(int(time.time())))
+            writer = tf.summary.FileWriter(os.path.join(tf_board, str(int(time.time()))))
+            writer.add_graph(session.graph)
+
             print("Timestep %d" % (t,))
             print("mean reward (100 episodes) %f" % mean_episode_reward)
             print("best mean reward %f" % best_mean_episode_reward)
