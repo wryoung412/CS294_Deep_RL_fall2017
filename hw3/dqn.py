@@ -357,10 +357,6 @@ def learn(env,
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
-            tf_board = os.path.join('/tmp/gube/dqn', str(int(time.time())))
-            writer = tf.summary.FileWriter(os.path.join(tf_board, str(int(time.time()))))
-            writer.add_graph(session.graph)
-
             print("Timestep %d" % (t,))
             print("mean reward (100 episodes) %f" % mean_episode_reward)
             print("best mean reward %f" % best_mean_episode_reward)
